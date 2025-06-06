@@ -6,6 +6,28 @@
 #define WHITE_ON_BLACK 0x07
 #define STACK_SIZE 1024
 
+#define IDT_ENTRIES 256
+#define PIC1_COMMAND 0x20
+#define PIC1_DATA 0x21
+#define PIC2_COMMAND 0xA0
+#define PIC2_DATA 0xA1
+#define ICW1_INIT 0x10
+#define ICW1_ICW4 0x01
+#define ICW4_8086 0x01
+
+typedef struct {
+    uint16_t offset_low;    // The lower 16 bits of the handler's address
+    uint16_t selector;      // Kernel segment selector
+    uint8_t zero;           // This must be zero
+    uint8_t type_attr;      // Type and attributes
+    uint16_t offset_high;   // The higher 16 bits of the handler's address
+} __attribute__((packed)) IDT_ENTRY;
+
+typedef struct {
+    uint16_t limit;
+    uint32_t base;
+} __attribute__((packed)) IDT_PTR;
+
 typedef struct {
     uint32_t *stack_pointer;
     uint32_t *stack;
@@ -18,6 +40,21 @@ int cursor_x = 0;
 int cursor_y = 0;
 
 Task task1, task2;
+
+IDT_ENTRY idt_entries[IDT_ENTRIES];
+IDT_PTR idt_ptr;
+
+extern void timer_irq(); // Defined in boot.asm
+
+void outb(uint16_t port, uint8_t value) {
+    __asm__ volatile ("outb %0, %1" : : "a"(value), "Nd"(port));
+}
+
+uint8_t inb(uint16_t port) {
+    uint8_t ret;
+    __asm__ volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
 
 void clear_screen() {
     for (int i = 0; i < SCREEN_WIDTH * SCREEN_HEIGHT; i++) {
@@ -56,6 +93,12 @@ void put_char(char c) {
     }
 }
 
+void print_string(const char* str) {
+    while (*str) {
+        put_char(*str++);
+    }
+}
+
 void init_task(Task *task, uint32_t *stack, uint32_t stack_size) {
     task->stack = stack;
     task->stack_size = stack_size;
@@ -85,33 +128,19 @@ void setup_timer() {
 }
 
 void setup_interrupts() {
-    // Настройка PIC и обработки прерываний
+    idt_init();
+    idt_set_gate(0x20, (uint32_t)timer_irq, 0x08, 0x8E);
 }
 
 void kernel_main() {
     clear_screen();
-    put_char('H');
-    put_char('e');
-    put_char('l');
-    put_char('l');
-    put_char('o');
-    put_char(',');
-    put_char(' ');
-    put_char('O');
-    put_char('S');
-    put_char(' ');
-    put_char('W');
-    put_char('o');
-    put_char('r');
-    put_char('l');
-    put_char('d');
-    put_char('!');
+    print_string("Hello, OS World!\n");
 
     setup_timer();
     setup_interrupts();
 
     while (1) {
-        switch_task();
+        // switch_task(); // Handled by timer interrupt
     }
 }
 
@@ -128,4 +157,45 @@ void free(void *ptr) {
 
 void interrupt_handler() {
     // Обработка прерываний
+}
+
+void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
+    idt_entries[num].offset_low = base & 0xFFFF;
+    idt_entries[num].offset_high = (base >> 16) & 0xFFFF;
+
+    idt_entries[num].selector = sel;
+    idt_entries[num].zero = 0;
+    idt_entries[num].type_attr = flags;
+}
+
+void idt_init() {
+    idt_ptr.limit = sizeof(IDT_ENTRY) * IDT_ENTRIES - 1;
+    idt_ptr.base = (uint32_t)&idt_entries;
+
+    // Null out all 256 IDT entries first
+    for (int i = 0; i < IDT_ENTRIES; i++) {
+        idt_set_gate(i, 0, 0, 0);
+    }
+
+    // Remap the PIC
+    outb(PIC1_COMMAND, ICW1_INIT | ICW1_ICW4);
+    outb(PIC2_COMMAND, ICW1_INIT | ICW1_ICW4);
+    outb(PIC1_DATA, 0x20); // PIC1_DATA offset of 0x20 in IDT
+    outb(PIC2_DATA, 0x28); // PIC2_DATA offset of 0x28 in IDT
+    outb(PIC1_DATA, 0x04);
+    outb(PIC2_DATA, 0x02);
+    outb(PIC1_DATA, ICW4_8086);
+    outb(PIC2_DATA, ICW4_8086);
+
+    outb(PIC1_DATA, 0x0);
+    outb(PIC2_DATA, 0x0);
+
+    __asm__ volatile("lidt %0" : : "memory"(&idt_ptr));
+    __asm__ volatile("sti");
+}
+
+void timer_interrupt_handler() {
+    print_string("Tick!\n");
+    switch_task();
+    outb(PIC1_COMMAND, 0x20); // End of Interrupt
 }
